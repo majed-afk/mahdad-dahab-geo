@@ -9,6 +9,146 @@ from streamlit_folium import st_folium
 import requests
 import json
 
+# --- Google Earth Engine ---
+import ee
+import google.oauth2.credentials
+
+
+def init_gee():
+    """Initialize Earth Engine with Streamlit secrets or local credentials."""
+    try:
+        if "earthengine" in st.secrets:
+            credentials = google.oauth2.credentials.Credentials(
+                token=None,
+                refresh_token=st.secrets["earthengine"]["refresh_token"],
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=st.secrets["earthengine"]["client_id"],
+                client_secret=st.secrets["earthengine"]["client_secret"],
+            )
+            ee.Initialize(credentials=credentials, project=st.secrets["earthengine"]["project"])
+        else:
+            ee.Initialize(project="carbide-ward-479915-f4")
+        return True
+    except Exception as e:
+        st.sidebar.warning(f"GEE not connected: {e}")
+        return False
+
+
+GEE_READY = init_gee()
+
+# --- Mineral Fingerprints Database ---
+MINERAL_FINGERPRINTS = {
+    "Gold (Au)": {
+        "name_ar": "ذهب",
+        "icon": "🥇",
+        "iron_oxide_range": (0.8, 1.0),
+        "clay_index_range": (0.6, 1.0),
+        "ferrous_range": (0.3, 0.7),
+        "ndvi_max": 0.15,
+        "description": "Epithermal Au-Ag systems with gossan caps, argillic alteration halos, and structural control along N-S faults.",
+        "reference_site": "Mahd Ad Dahab",
+        "host_rocks": "Felsic volcanics, quartz veins",
+        "alteration": "Silicification → Argillic → Propylitic",
+    },
+    "Copper (Cu)": {
+        "name_ar": "نحاس",
+        "icon": "🟤",
+        "iron_oxide_range": (0.6, 1.0),
+        "clay_index_range": (0.5, 0.9),
+        "ferrous_range": (0.5, 1.0),
+        "ndvi_max": 0.2,
+        "description": "Porphyry Cu systems with strong iron oxide and ferrous iron signatures in mafic-intermediate host rocks.",
+        "reference_site": "Jabal Sayid",
+        "host_rocks": "Andesite, diorite, gabbro",
+        "alteration": "Potassic → Phyllic → Propylitic",
+    },
+    "Silver (Ag)": {
+        "name_ar": "فضة",
+        "icon": "⬜",
+        "iron_oxide_range": (0.5, 0.9),
+        "clay_index_range": (0.7, 1.0),
+        "ferrous_range": (0.2, 0.6),
+        "ndvi_max": 0.15,
+        "description": "Ag-rich epithermal veins with strong clay alteration and moderate iron oxide. Often co-located with Au.",
+        "reference_site": "As Suq",
+        "host_rocks": "Rhyolite, dacite tuffs",
+        "alteration": "Advanced argillic → Argillic",
+    },
+    "Zinc-Lead (Zn-Pb)": {
+        "name_ar": "زنك-رصاص",
+        "icon": "🔘",
+        "iron_oxide_range": (0.4, 0.8),
+        "clay_index_range": (0.4, 0.8),
+        "ferrous_range": (0.6, 1.0),
+        "ndvi_max": 0.2,
+        "description": "VMS-type Zn-Pb deposits in mafic volcanic sequences with moderate iron oxide and high ferrous signatures.",
+        "reference_site": "Al Masane",
+        "host_rocks": "Basalt, volcaniclastics",
+        "alteration": "Chloritic → Sericitic",
+    },
+}
+
+
+@st.cache_data(ttl=3600, show_spinner="Fetching Landsat data from Google Earth Engine...")
+def fetch_gee_data(lat, lon, radius_km, year):
+    """Fetch real spectral indices from Landsat 8/9 via Earth Engine."""
+    roi = ee.Geometry.Point([lon, lat]).buffer(radius_km * 1000)
+
+    image = (
+        ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+        .filterBounds(roi)
+        .filterDate(f"{year}-01-01", f"{year}-12-31")
+        .filter(ee.Filter.lt("CLOUD_COVER", 20))
+        .median()
+    )
+
+    # Scale factors
+    optical = image.select(["SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B6", "SR_B7"]).multiply(0.0000275).add(-0.2)
+
+    # Spectral indices
+    iron_oxide = optical.select("SR_B4").divide(optical.select("SR_B2")).rename("iron_oxide")
+    clay_index = optical.select("SR_B6").divide(optical.select("SR_B7")).rename("clay_index")
+    ferrous = optical.select("SR_B6").divide(optical.select("SR_B5")).rename("ferrous")
+    ndvi = optical.normalizedDifference(["SR_B5", "SR_B4"]).rename("ndvi")
+
+    composite = iron_oxide.addBands([clay_index, ferrous, ndvi])
+
+    num_pixels = min(500, int((radius_km * 2) ** 2))
+    samples = composite.sample(region=roi, scale=30, numPixels=num_pixels, seed=42, geometries=True).getInfo()
+
+    if not samples["features"]:
+        return None
+
+    rows = []
+    for f in samples["features"]:
+        coords = f["geometry"]["coordinates"]
+        props = f["properties"]
+        rows.append({
+            "Latitude": coords[1],
+            "Longitude": coords[0],
+            "Iron_Oxide": props.get("iron_oxide", 0),
+            "Clay_Index": props.get("clay_index", 0),
+            "Ferrous": props.get("ferrous", 0),
+            "NDVI": props.get("ndvi", 0),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def compute_mineral_score(df, fingerprint):
+    """Score each pixel against a mineral fingerprint."""
+    fe_min, fe_max = fingerprint["iron_oxide_range"]
+    clay_min, clay_max = fingerprint["clay_index_range"]
+    ferr_min, ferr_max = fingerprint["ferrous_range"]
+
+    fe_norm = np.clip((df["Iron_Oxide"] - fe_min) / (fe_max - fe_min + 1e-6), 0, 1)
+    clay_norm = np.clip((df["Clay_Index"] - clay_min) / (clay_max - clay_min + 1e-6), 0, 1)
+    ferr_norm = np.clip((df["Ferrous"] - ferr_min) / (ferr_max - ferr_min + 1e-6), 0, 1)
+    veg_mask = (df["NDVI"] < fingerprint["ndvi_max"]).astype(float)
+
+    score = (fe_norm * 0.35 + clay_norm * 0.30 + ferr_norm * 0.20 + veg_mask * 0.15)
+    return np.clip(score, 0, 1)
+
 st.set_page_config(
     page_title="Mahd Ad Dahab — Geological Explorer",
     page_icon="🪨",
@@ -134,6 +274,27 @@ df = generate_geospatial_data()
 st.sidebar.title("🔬 Exploration Engine")
 st.sidebar.markdown("---")
 
+# GEE Mineral Search
+st.sidebar.subheader("🔍 Mineral Search (GEE)")
+if GEE_READY:
+    selected_mineral = st.sidebar.selectbox("Target Mineral", list(MINERAL_FINGERPRINTS.keys()))
+    fp = MINERAL_FINGERPRINTS[selected_mineral]
+    st.sidebar.caption(f"{fp['icon']} {fp['name_ar']} — {fp['reference_site']}")
+
+    search_lat = st.sidebar.number_input("Latitude", value=23.4986, format="%.4f")
+    search_lon = st.sidebar.number_input("Longitude", value=40.8522, format="%.4f")
+    search_radius = st.sidebar.slider("Search Radius (km)", 1, 30, 10)
+    search_year = st.sidebar.slider("Landsat Year", 2020, 2025, 2024)
+
+    run_gee = st.sidebar.button("🛰️ Run GEE Analysis", type="primary", use_container_width=True)
+else:
+    selected_mineral = "Gold (Au)"
+    fp = MINERAL_FINGERPRINTS[selected_mineral]
+    search_lat, search_lon, search_radius, search_year = 23.4986, 40.8522, 10, 2024
+    run_gee = False
+    st.sidebar.info("GEE not connected — using synthetic data")
+
+st.sidebar.markdown("---")
 st.sidebar.subheader("⚖️ Fuzzy Evidence Weights")
 w_iron = st.sidebar.slider("Iron Oxide (Gossan)", 0.0, 1.0, 0.35, 0.05)
 w_clay = st.sidebar.slider("Argillic Clay", 0.0, 1.0, 0.25, 0.05)
@@ -176,9 +337,18 @@ df["Favorability_Score"] = (fuzzy_product ** (1 - gamma)) * (fuzzy_sum ** gamma)
 st.title("🪨 Mahd Ad Dahab — Geological Explorer")
 st.caption("Multi-Layer Geological Mapping & Mineral Prospectivity Analysis — Mahd Ad Dahab Region, Saudi Arabia")
 
+# --- GEE Data ---
+gee_df = None
+if GEE_READY and run_gee:
+    gee_df = fetch_gee_data(search_lat, search_lon, search_radius, search_year)
+    if gee_df is not None:
+        gee_df["Mineral_Score"] = compute_mineral_score(gee_df, fp)
+        st.success(f"🛰️ Fetched {len(gee_df)} real Landsat pixels — {selected_mineral} analysis complete")
+
 # --- Tabs ---
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab_gee, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🗺️ Geological Map",
+    "🛰️ GEE Live Analysis",
     "🔬 Spectral Fingerprint",
     "📊 Covariate Statistics",
     "⚗️ Spectral Unmixing (ELMM)",
@@ -350,6 +520,92 @@ with tab1:
         st.markdown("**Heatmap**")
         st.markdown('🔴 High &nbsp; 🟡 Medium &nbsp; 🔵 Low favorability', unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
+
+# ===== TAB GEE: Live Satellite Analysis =====
+with tab_gee:
+    st.subheader(f"🛰️ Live Landsat Analysis — {fp['icon']} {selected_mineral}")
+
+    if gee_df is not None and len(gee_df) > 0:
+        col_info, col_stats = st.columns([1, 1])
+        with col_info:
+            st.markdown(f"""
+            <div class="report-box">
+            <h4>{fp['icon']} {selected_mineral} Fingerprint</h4>
+            <p><b>Target:</b> {fp['description']}</p>
+            <p><b>Reference Site:</b> {fp['reference_site']}</p>
+            <p><b>Host Rocks:</b> {fp['host_rocks']}</p>
+            <p><b>Alteration:</b> {fp['alteration']}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col_stats:
+            high = len(gee_df[gee_df["Mineral_Score"] > 0.7])
+            med = len(gee_df[(gee_df["Mineral_Score"] > 0.4) & (gee_df["Mineral_Score"] <= 0.7)])
+            low = len(gee_df[gee_df["Mineral_Score"] <= 0.4])
+            c1, c2, c3 = st.columns(3)
+            c1.metric("🔴 High", high)
+            c2.metric("🟡 Medium", med)
+            c3.metric("🔵 Low", low)
+            st.caption(f"Data: Landsat 8 SR ({search_year}) | {len(gee_df)} pixels | {search_radius}km radius")
+
+        # GEE Map
+        gee_map = folium.Map(location=[search_lat, search_lon], zoom_start=12,
+                             tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                             attr="Esri")
+
+        heat_data = gee_df[["Latitude", "Longitude", "Mineral_Score"]].values.tolist()
+        HeatMap(heat_data, name=f"{selected_mineral} Heatmap", radius=15, blur=20,
+                gradient={0.2: "#0000ff", 0.4: "#00ffff", 0.6: "#00ff00", 0.8: "#ffff00", 1.0: "#ff0000"}).add_to(gee_map)
+
+        # Top targets as markers
+        top = gee_df.nlargest(10, "Mineral_Score")
+        for _, row in top.iterrows():
+            folium.CircleMarker(
+                location=[row["Latitude"], row["Longitude"]],
+                radius=8, color="#ff0000", fill=True, fill_opacity=0.9,
+                popup=f"Score: {row['Mineral_Score']:.2f}<br>Fe: {row['Iron_Oxide']:.3f}<br>Clay: {row['Clay_Index']:.3f}<br>Ferrous: {row['Ferrous']:.3f}",
+            ).add_to(gee_map)
+
+        folium.Marker([search_lat, search_lon], tooltip="Search Center",
+                      icon=folium.Icon(color="green", icon="crosshairs", prefix="fa")).add_to(gee_map)
+
+        folium.LayerControl().add_to(gee_map)
+        st_folium(gee_map, width=None, height=500, use_container_width=True)
+
+        # Scatter: Iron vs Clay colored by score
+        st.subheader("Alteration Space — Real Landsat Data")
+        fig_scatter = px.scatter(
+            gee_df, x="Iron_Oxide", y="Clay_Index", color="Mineral_Score",
+            size="Mineral_Score", color_continuous_scale="Jet", template="plotly_dark",
+            hover_data=["Ferrous", "NDVI", "Latitude", "Longitude"],
+            title=f"Iron Oxide vs Clay Index — {selected_mineral} Prospectivity",
+        )
+        st.plotly_chart(fig_scatter, use_container_width=True)
+
+        # Top targets table
+        st.subheader("🎯 Top 10 Exploration Targets")
+        st.dataframe(
+            top[["Latitude", "Longitude", "Mineral_Score", "Iron_Oxide", "Clay_Index", "Ferrous", "NDVI"]]
+            .sort_values("Mineral_Score", ascending=False)
+            .style.background_gradient(cmap="YlOrRd"),
+            use_container_width=True,
+        )
+    else:
+        st.info("👈 Select a mineral and click **Run GEE Analysis** in the sidebar to fetch real satellite data.")
+        st.markdown(f"""
+        <div class="report-box">
+        <h4>How it works</h4>
+        <ol>
+        <li>Select a <b>target mineral</b> (Gold, Copper, Silver, Zinc-Lead)</li>
+        <li>Set <b>coordinates</b> and <b>radius</b> for search area</li>
+        <li>Click <b>🛰️ Run GEE Analysis</b></li>
+        <li>The system fetches real Landsat 8 data from Google Earth Engine</li>
+        <li>Computes spectral indices (Iron Oxide, Clay, Ferrous Iron)</li>
+        <li>Scores each pixel against the mineral's geological fingerprint</li>
+        <li>Shows a <b>prospectivity heatmap</b> with ranked targets</li>
+        </ol>
+        </div>
+        """, unsafe_allow_html=True)
 
 # ===== TAB 2: Spectral Fingerprint =====
 with tab2:

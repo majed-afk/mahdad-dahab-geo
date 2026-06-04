@@ -5,3 +5,6 @@ plotly
 folium
 streamlit-folium
 requests
+matplotlib
+earthengine-api
+google-auth
