@@ -712,9 +712,16 @@ st.sidebar.markdown(f"""
 
 st.sidebar.markdown('<div style="font-size:0.68rem;color:#5c6678;text-transform:uppercase;letter-spacing:0.08em;font-weight:600;margin-bottom:4px;">Search Area</div>', unsafe_allow_html=True)
 sb_c1, sb_c2 = st.sidebar.columns(2)
-search_lat = sb_c1.number_input("Lat", value=23.4986, format="%.4f", label_visibility="collapsed")
-search_lon = sb_c2.number_input("Lon", value=40.8522, format="%.4f", label_visibility="collapsed")
-st.sidebar.caption(f"{search_lat:.4f}°N, {search_lon:.4f}°E")
+# Use selected site coords if available, otherwise sidebar input
+_default_lat = st.session_state.get("selected_site", {}).get("lat", 23.4986)
+_default_lon = st.session_state.get("selected_site", {}).get("lon", 40.8522)
+search_lat = sb_c1.number_input("Lat", value=_default_lat, format="%.4f", label_visibility="collapsed")
+search_lon = sb_c2.number_input("Lon", value=_default_lon, format="%.4f", label_visibility="collapsed")
+_sel_name = st.session_state.get("selected_site", {}).get("name", "")
+if _sel_name:
+    st.sidebar.caption(f"📍 {_sel_name} — {search_lat:.4f}°N, {search_lon:.4f}°E")
+else:
+    st.sidebar.caption(f"{search_lat:.4f}°N, {search_lon:.4f}°E")
 
 search_radius = st.sidebar.slider("Scan Radius (km)", 1, 30, 10)
 search_year = st.sidebar.slider("Landsat Year", 2020, 2025, 2024)
@@ -1046,7 +1053,7 @@ with map_col1:
     st.markdown('<div class="panel"><div class="panel-title">Geological Reference Map</div>', unsafe_allow_html=True)
 
     m_geo = folium.Map(
-        location=[LAT_CENTER, LON_CENTER],
+        location=[search_lat, search_lon],
         zoom_start=11,
         tiles="https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
         attr="CartoDB Dark",
