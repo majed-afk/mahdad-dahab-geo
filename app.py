@@ -1071,7 +1071,10 @@ with map_col1:
             opacity=0.5,
         ).add_to(m_geo)
 
-    if show_geology:
+    # Only show Mahd Ad Dahab geological overlays when within 30km of reference
+    _near_mahd = abs(search_lat - 23.4986) < 0.3 and abs(search_lon - 40.8522) < 0.3
+
+    if show_geology and _near_mahd:
         for unit in GEOLOGICAL_UNITS:
             folium.Polygon(
                 locations=unit["coords"],
@@ -1084,7 +1087,7 @@ with map_col1:
                 tooltip=unit["name"],
             ).add_to(m_geo)
 
-    if show_faults:
+    if show_faults and _near_mahd:
         for fault in FAULT_LINES:
             folium.PolyLine(
                 locations=fault["coords"],
@@ -1095,7 +1098,7 @@ with map_col1:
                 tooltip=fault["name"],
             ).add_to(m_geo)
 
-    if show_deposits:
+    if show_deposits and _near_mahd:
         status_icons = {"Active Mine": ("star", "red"), "Prospect": ("info-sign", "orange"), "Occurrence": ("record", "blue"), "Historical": ("time", "purple")}
         for dep in KNOWN_DEPOSITS:
             icon_name, icon_color = status_icons.get(dep["status"], ("record", "gray"))
@@ -1105,6 +1108,20 @@ with map_col1:
                 tooltip=dep["name"],
                 icon=folium.Icon(color=icon_color, icon=icon_name, prefix="glyphicon"),
             ).add_to(m_geo)
+
+    # Add center marker for current search location
+    folium.Marker(
+        [search_lat, search_lon],
+        tooltip=f"Search Center ({search_lat:.4f}, {search_lon:.4f})",
+        icon=folium.Icon(color="green", icon="crosshairs", prefix="fa"),
+    ).add_to(m_geo)
+
+    if not _near_mahd:
+        # Add heatmap to geological map too when away from reference
+        if gee_df is not None and len(gee_df) > 0:
+            heat_geo = gee_df[["Latitude", "Longitude", score_col]].values.tolist()
+            HeatMap(heat_geo, radius=12, blur=18, opacity=0.4,
+                    gradient={0.2: "#0000ff", 0.4: "#00ffff", 0.6: "#00ff00", 0.8: "#ffff00", 1.0: "#ff0000"}).add_to(m_geo)
 
     MeasureControl(position="topleft").add_to(m_geo)
     folium.LayerControl(collapsed=True).add_to(m_geo)
