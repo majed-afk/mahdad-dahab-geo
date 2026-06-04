@@ -1135,7 +1135,7 @@ with map_col2:
                 popup=f"Score: {row['Mineral_Score']:.3f}",
             ).add_to(m_heat)
     else:
-        heat_data = df[["Latitude", "Longitude", "Favorability_Score"]].values.tolist()
+        heat_data = active_df[["Latitude", "Longitude", score_col]].values.tolist()
         HeatMap(heat_data, name="Favorability", radius=16, blur=20,
                 gradient={0.2: "#0d1b4a", 0.35: "#1b4dff", 0.5: "#00d4aa", 0.7: "#f0a030", 0.85: "#ff4d6a", 1.0: "#ff1744"}).add_to(m_heat)
 
@@ -1177,8 +1177,8 @@ with comp_col1:
         curr_ferrous = float(gee_df["Ferrous"].mean())
         curr_ndvi = float(gee_df["NDVI"].mean())
     else:
-        curr_iron = float(df["Iron_Oxide"].mean())
-        curr_clay = float(df["Clay_Index"].mean())
+        curr_iron = float(active_df["Iron_Oxide"].mean())
+        curr_clay = float(active_df["Clay_Index"].mean())
         curr_ferrous = 0.45
         curr_ndvi = 0.10
 
@@ -1299,7 +1299,7 @@ with chart_col1:
         )
     else:
         fig_scatter = px.scatter(
-            df, x="Iron_Oxide", y="Clay_Index", color="Favorability_Score",
+            active_df, x="Iron_Oxide", y="Clay_Index", color=score_col,
             color_continuous_scale=["#0d1b4a", "#1b4dff", "#00d4aa", "#f0a030", "#ff4d6a"],
             title="Alteration Space — Iron Oxide vs Clay Index",
         )
@@ -1372,8 +1372,9 @@ if gee_df is not None and len(gee_df) > 0:
     targets_df = gee_df.nlargest(20, "Mineral_Score")[["Latitude", "Longitude", "Mineral_Score", "Iron_Oxide", "Clay_Index", "Ferrous", "NDVI"]].copy()
     targets_df = targets_df.rename(columns={"Mineral_Score": "Score"})
 else:
-    targets_df = df.nlargest(20, "Favorability_Score")[["Latitude", "Longitude", "Favorability_Score", "Iron_Oxide", "Clay_Index", "Lineament_Density", "TWI"]].copy()
-    targets_df = targets_df.rename(columns={"Favorability_Score": "Score"})
+    avail_cols = ["Latitude", "Longitude", score_col] + [c for c in ["Iron_Oxide", "Clay_Index", "Lineament_Density", "TWI", "Ferrous", "NDVI"] if c in active_df.columns]
+    targets_df = active_df.nlargest(20, score_col)[avail_cols].copy()
+    targets_df = targets_df.rename(columns={score_col: "Score"})
 
 targets_df.insert(0, "Rank", range(1, len(targets_df) + 1))
 targets_df = targets_df.reset_index(drop=True)
