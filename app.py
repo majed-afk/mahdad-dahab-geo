@@ -1203,45 +1203,30 @@ with comp_col1:
     ndvi_ok = curr_ndvi < fp["ndvi_max"]
     overall_match = int((iron_match + clay_match + ferrous_match + (100 if ndvi_ok else 30)) / 4)
 
+    def render_bar(label, value, color, match, note):
+        return f"""
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+            <div style="width:90px;font-size:0.75rem;font-weight:600;color:#8a94a6;text-transform:uppercase;">{label}</div>
+            <div style="flex:1;height:10px;background:#1e2a3a;border-radius:5px;overflow:hidden;">
+                <div style="width:{min(value/2.5*100, 100):.0f}%;height:100%;background:{color};border-radius:5px;"></div>
+            </div>
+            <div style="width:55px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:0.8rem;font-weight:500;color:#e4e8ee;">{value:.3f}</div>
+            <div style="width:40px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:0.75rem;font-weight:600;color:{color};">{match}%</div>
+        </div>
+        <div style="font-size:0.62rem;color:#5c6678;margin:0 0 10px 100px;">{note}</div>
+        """
+
+    bars_html = render_bar("Iron Oxide", curr_iron, bar_color(curr_iron, *fp['iron_oxide_range']), iron_match, f"Target: {fp['iron_oxide_range'][0]:.1f} – {fp['iron_oxide_range'][1]:.1f}")
+    bars_html += render_bar("Clay Index", curr_clay, bar_color(curr_clay, *fp['clay_index_range']), clay_match, f"Target: {fp['clay_index_range'][0]:.1f} – {fp['clay_index_range'][1]:.1f}")
+    bars_html += render_bar("Ferrous", curr_ferrous, bar_color(curr_ferrous, *fp['ferrous_range']), ferrous_match, f"Target: {fp['ferrous_range'][0]:.1f} – {fp['ferrous_range'][1]:.1f}")
+    bars_html += render_bar("NDVI", curr_ndvi, '#00d4aa' if ndvi_ok else '#ff4d6a', 100 if ndvi_ok else 30, f"Must be < {fp['ndvi_max']} — {'Pass' if ndvi_ok else 'FAIL'}")
+
     st.markdown(f"""
-    <div class="panel">
-        <div class="panel-title">Site vs {fp['reference_site']} Reference Profile &mdash; Overall Match: <span style="color:var(--accent);font-size:0.82rem;">{overall_match}%</span></div>
-
-        <div class="comp-bar-wrap">
-            <div class="comp-bar-label">Iron Oxide</div>
-            <div class="comp-bar-track">
-                <div class="comp-bar-fill" style="width:{min(curr_iron*100, 100):.0f}%;background:{bar_color(curr_iron, *fp['iron_oxide_range'])};"></div>
-            </div>
-            <div class="comp-bar-val">{curr_iron:.3f}</div>
+    <div style="background:#151c27;border:1px solid #1e2a3a;border-radius:8px;padding:16px;">
+        <div style="font-size:0.72rem;font-weight:600;color:#8a94a6;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:14px;">
+            Site vs {fp['reference_site']} Reference — Overall Match: <span style="color:#00d4aa;font-size:0.85rem;font-weight:700;">{overall_match}%</span>
         </div>
-        <div style="font-size:0.65rem;color:#5c6678;margin:-2px 0 8px 98px;">Target range: {fp['iron_oxide_range'][0]:.1f} &ndash; {fp['iron_oxide_range'][1]:.1f} &nbsp;&bull;&nbsp; Match: {iron_match}%</div>
-
-        <div class="comp-bar-wrap">
-            <div class="comp-bar-label">Clay Index</div>
-            <div class="comp-bar-track">
-                <div class="comp-bar-fill" style="width:{min(curr_clay*100, 100):.0f}%;background:{bar_color(curr_clay, *fp['clay_index_range'])};"></div>
-            </div>
-            <div class="comp-bar-val">{curr_clay:.3f}</div>
-        </div>
-        <div style="font-size:0.65rem;color:#5c6678;margin:-2px 0 8px 98px;">Target range: {fp['clay_index_range'][0]:.1f} &ndash; {fp['clay_index_range'][1]:.1f} &nbsp;&bull;&nbsp; Match: {clay_match}%</div>
-
-        <div class="comp-bar-wrap">
-            <div class="comp-bar-label">Ferrous Iron</div>
-            <div class="comp-bar-track">
-                <div class="comp-bar-fill" style="width:{min(curr_ferrous*100, 100):.0f}%;background:{bar_color(curr_ferrous, *fp['ferrous_range'])};"></div>
-            </div>
-            <div class="comp-bar-val">{curr_ferrous:.3f}</div>
-        </div>
-        <div style="font-size:0.65rem;color:#5c6678;margin:-2px 0 8px 98px;">Target range: {fp['ferrous_range'][0]:.1f} &ndash; {fp['ferrous_range'][1]:.1f} &nbsp;&bull;&nbsp; Match: {ferrous_match}%</div>
-
-        <div class="comp-bar-wrap">
-            <div class="comp-bar-label">NDVI</div>
-            <div class="comp-bar-track">
-                <div class="comp-bar-fill" style="width:{min(curr_ndvi*100*3, 100):.0f}%;background:{'var(--accent)' if ndvi_ok else 'var(--red)'};"></div>
-            </div>
-            <div class="comp-bar-val">{curr_ndvi:.3f}</div>
-        </div>
-        <div style="font-size:0.65rem;color:#5c6678;margin:-2px 0 8px 98px;">Must be &lt; {fp['ndvi_max']} &nbsp;&bull;&nbsp; {'Pass' if ndvi_ok else 'FAIL — vegetation interference'}</div>
+        {bars_html}
     </div>
     """, unsafe_allow_html=True)
 
