@@ -85,6 +85,8 @@ MINERAL_FINGERPRINTS = {
         "host_rocks": "Basalt, volcaniclastics",
         "alteration": "Chloritic → Sericitic",
     },
+}
+
 # --- Candidate Scan Sites across the Arabian Shield ---
 SCAN_SITES = [
     {"name": "Mahd Ad Dahab", "name_ar": "مهد الذهب", "lat": 23.4986, "lon": 40.8522, "region": "Hejaz"},
