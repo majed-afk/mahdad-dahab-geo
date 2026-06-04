@@ -85,7 +85,80 @@ MINERAL_FINGERPRINTS = {
         "host_rocks": "Basalt, volcaniclastics",
         "alteration": "Chloritic → Sericitic",
     },
-}
+# --- Candidate Scan Sites across the Arabian Shield ---
+SCAN_SITES = [
+    {"name": "Mahd Ad Dahab", "name_ar": "مهد الذهب", "lat": 23.4986, "lon": 40.8522, "region": "Hejaz"},
+    {"name": "Jabal Sayid", "name_ar": "جبل صايد", "lat": 23.73, "lon": 40.92, "region": "Hejaz"},
+    {"name": "Al Amar", "name_ar": "العمار", "lat": 22.72, "lon": 44.03, "region": "Najd"},
+    {"name": "Bulghah", "name_ar": "بلغة", "lat": 26.08, "lon": 42.05, "region": "Central"},
+    {"name": "Ad Duwayhi", "name_ar": "الدويحي", "lat": 22.38, "lon": 43.37, "region": "Najd"},
+    {"name": "Sukhaybarat", "name_ar": "صخيبرات", "lat": 25.95, "lon": 42.27, "region": "Central"},
+    {"name": "Al Masane", "name_ar": "المسعنة", "lat": 19.42, "lon": 43.20, "region": "Asir"},
+    {"name": "Ar Rjum", "name_ar": "الرجوم", "lat": 23.10, "lon": 41.50, "region": "Hejaz"},
+    {"name": "Jabal Idsas", "name_ar": "جبل إدساس", "lat": 23.60, "lon": 40.85, "region": "Hejaz"},
+    {"name": "Wadi Bidah", "name_ar": "وادي بيضاء", "lat": 20.00, "lon": 41.35, "region": "Asir"},
+    {"name": "Jabal Samran", "name_ar": "جبل سمران", "lat": 20.25, "lon": 41.25, "region": "Asir"},
+    {"name": "Zalm", "name_ar": "ظلم", "lat": 22.85, "lon": 42.95, "region": "Najd"},
+    {"name": "Hamdah", "name_ar": "حمضة", "lat": 23.90, "lon": 41.80, "region": "Hejaz"},
+    {"name": "Umm Ash Shalahib", "name_ar": "أم الشلاهيب", "lat": 21.50, "lon": 42.90, "region": "Asir"},
+    {"name": "Al Hajar", "name_ar": "الحجر", "lat": 24.50, "lon": 41.10, "region": "Central"},
+]
+
+
+@st.cache_data(ttl=7200, show_spinner=False)
+def scan_site(lat, lon, year, _fingerprint_key):
+    """Fetch mean spectral indices for a single site (small sample for speed)."""
+    try:
+        roi = ee.Geometry.Point([lon, lat]).buffer(3000)
+        image = (
+            ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+            .filterBounds(roi)
+            .filterDate(f"{year}-01-01", f"{year}-12-31")
+            .filter(ee.Filter.lt("CLOUD_COVER", 20))
+            .median()
+        )
+        optical = image.select(["SR_B2", "SR_B4", "SR_B5", "SR_B6", "SR_B7"]).multiply(0.0000275).add(-0.2)
+        iron_oxide = optical.select("SR_B4").divide(optical.select("SR_B2"))
+        clay_index = optical.select("SR_B6").divide(optical.select("SR_B7"))
+        ferrous = optical.select("SR_B6").divide(optical.select("SR_B5"))
+        ndvi = optical.normalizedDifference(["SR_B5", "SR_B4"])
+
+        composite = iron_oxide.addBands([clay_index, ferrous, ndvi])
+        stats = composite.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=roi,
+            scale=30,
+            maxPixels=5000,
+        ).getInfo()
+
+        return {
+            "iron_oxide": stats.get("iron_oxide", 0) or 0,
+            "clay_index": stats.get("clay_index", 0) or 0,
+            "ferrous": stats.get("ferrous", 0) or 0,
+            "ndvi": stats.get("ndvi", 0) or 0,
+        }
+    except Exception:
+        return None
+
+
+def score_single_site(stats, fingerprint):
+    """Score a single site's mean indices against the mineral fingerprint."""
+    if not stats:
+        return 0.0
+    fe_raw = np.clip((stats["iron_oxide"] - 0.5) / 2.5, 0, 1)
+    clay_raw = np.clip((stats["clay_index"] - 0.8) / 0.7, 0, 1)
+    ferr_raw = np.clip((stats["ferrous"] - 0.5) / 1.5, 0, 1)
+
+    fe_center = sum(fingerprint["iron_oxide_range"]) / 2
+    clay_center = sum(fingerprint["clay_index_range"]) / 2
+    ferr_center = sum(fingerprint["ferrous_range"]) / 2
+
+    fe_s = np.exp(-((fe_raw - fe_center) ** 2) / (2 * 0.15 ** 2))
+    clay_s = np.exp(-((clay_raw - clay_center) ** 2) / (2 * 0.15 ** 2))
+    ferr_s = np.exp(-((ferr_raw - ferr_center) ** 2) / (2 * 0.15 ** 2))
+    veg = 1.0 if stats["ndvi"] < fingerprint["ndvi_max"] else 0.3
+
+    return float((fe_s * 0.35 + clay_s * 0.30 + ferr_s * 0.20 + 0.15) * veg)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -750,6 +823,101 @@ st.markdown(f"""
     </div>
 </div>
 """, unsafe_allow_html=True)
+
+
+# ====================================================================
+#  SECTION 0 — Similar Sites Auto-Scanner
+# ====================================================================
+
+st.markdown('<div class="section-header">Similar Sites — Arabian Shield Scanner</div>', unsafe_allow_html=True)
+
+if GEE_READY:
+    with st.spinner("Scanning 15 sites across the Arabian Shield..."):
+        site_results = []
+        for site in SCAN_SITES:
+            stats = scan_site(site["lat"], site["lon"], search_year, selected_mineral)
+            similarity = score_single_site(stats, fp)
+            site_results.append({
+                **site,
+                "similarity": similarity,
+                "iron_oxide": stats["iron_oxide"] if stats else 0,
+                "clay_index": stats["clay_index"] if stats else 0,
+                "ferrous": stats["ferrous"] if stats else 0,
+                "ndvi": stats["ndvi"] if stats else 0,
+            })
+        site_results.sort(key=lambda x: x["similarity"], reverse=True)
+
+    # Similar sites map
+    sim_map = folium.Map(
+        location=[23.0, 42.0], zoom_start=6,
+        tiles="https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png", attr="CartoDB",
+    )
+
+    for i, site in enumerate(site_results):
+        pct = int(site["similarity"] * 100)
+        if pct >= 70:
+            color, tag = "#ff4d6a", "HIGH"
+        elif pct >= 40:
+            color, tag = "#f0a030", "MODERATE"
+        else:
+            color, tag = "#3b82f6", "LOW"
+
+        folium.CircleMarker(
+            location=[site["lat"], site["lon"]],
+            radius=max(6, pct / 5),
+            color=color, fill=True, fill_color=color, fill_opacity=0.8,
+            popup=folium.Popup(
+                f"<b>{site['name']}</b> ({site['name_ar']})<br>"
+                f"<b>Match: {pct}%</b> [{tag}]<br>"
+                f"Region: {site['region']}<br>"
+                f"Fe₂O₃: {site['iron_oxide']:.3f}<br>"
+                f"Clay: {site['clay_index']:.3f}<br>"
+                f"Ferrous: {site['ferrous']:.3f}",
+                max_width=250,
+            ),
+            tooltip=f"{site['name']} — {pct}%",
+        ).add_to(sim_map)
+
+    sim_col1, sim_col2 = st.columns([3, 2])
+
+    with sim_col1:
+        st.markdown('<div class="panel"><div class="panel-title">SITES RANKED BY SIMILARITY TO REFERENCE</div></div>', unsafe_allow_html=True)
+        st_folium(sim_map, width=None, height=420, use_container_width=True)
+
+    with sim_col2:
+        st.markdown('<div class="panel"><div class="panel-title">SIMILARITY RANKING</div></div>', unsafe_allow_html=True)
+        for i, site in enumerate(site_results):
+            pct = int(site["similarity"] * 100)
+            if pct >= 70:
+                bar_color, tag_class = "#ff4d6a", "tag-high"
+            elif pct >= 40:
+                bar_color, tag_class = "#f0a030", "tag-moderate"
+            else:
+                bar_color, tag_class = "#3b82f6", "tag-low"
+
+            st.markdown(f"""
+            <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #1e2a3a;">
+                <div style="width:18px;color:#5c6678;font-size:0.75rem;font-weight:600;">{i+1}</div>
+                <div style="flex:1;">
+                    <div style="font-size:0.82rem;font-weight:500;color:#e4e8ee;">{site['name']}</div>
+                    <div style="font-size:0.68rem;color:#5c6678;">{site['name_ar']} — {site['region']}</div>
+                </div>
+                <div style="width:120px;background:#1e2a3a;border-radius:4px;height:8px;overflow:hidden;">
+                    <div style="width:{pct}%;height:100%;background:{bar_color};border-radius:4px;"></div>
+                </div>
+                <div style="width:40px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:0.82rem;font-weight:600;color:{bar_color};">{pct}%</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown(f"""
+        <div style="margin-top:12px;padding:10px;background:rgba(0,212,170,0.08);border:1px solid rgba(0,212,170,0.2);border-radius:6px;font-size:0.75rem;color:#8a94a6;">
+            Scanned <b>{len(SCAN_SITES)}</b> geological sites across the Arabian Shield against
+            <b>{selected_mineral}</b> spectral fingerprint using Landsat 8 ({search_year}) data.
+        </div>
+        """, unsafe_allow_html=True)
+
+else:
+    st.info("GEE not connected — similar sites scanning requires live satellite data.")
 
 
 # ====================================================================
