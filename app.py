@@ -916,29 +916,26 @@ if GEE_READY:
         st_folium(sim_map, width=None, height=420, use_container_width=True)
 
     with sim_col2:
-        st.markdown('<div class="panel"><div class="panel-title">SIMILARITY RANKING</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel"><div class="panel-title">SIMILARITY RANKING — click to explore</div></div>', unsafe_allow_html=True)
         for i, site in enumerate(site_results):
             pct = int(site["similarity"] * 100)
             if pct >= 70:
-                bar_color, tag_class = "#ff4d6a", "tag-high"
+                bar_color = "#ff4d6a"
             elif pct >= 40:
-                bar_color, tag_class = "#f0a030", "tag-moderate"
+                bar_color = "#f0a030"
             else:
-                bar_color, tag_class = "#3b82f6", "tag-low"
+                bar_color = "#3b82f6"
 
-            st.markdown(f"""
-            <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #1e2a3a;">
-                <div style="width:18px;color:#5c6678;font-size:0.75rem;font-weight:600;">{i+1}</div>
-                <div style="flex:1;">
-                    <div style="font-size:0.82rem;font-weight:500;color:#e4e8ee;">{site['name']}</div>
-                    <div style="font-size:0.68rem;color:#5c6678;">{site['name_ar']} — {site['region']}</div>
-                </div>
-                <div style="width:120px;background:#1e2a3a;border-radius:4px;height:8px;overflow:hidden;">
-                    <div style="width:{pct}%;height:100%;background:{bar_color};border-radius:4px;"></div>
-                </div>
-                <div style="width:40px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:0.82rem;font-weight:600;color:{bar_color};">{pct}%</div>
-            </div>
-            """, unsafe_allow_html=True)
+            col_btn, col_bar = st.columns([4, 1])
+            with col_btn:
+                if st.button(
+                    f"{site['name']}  ({site['name_ar']})",
+                    key=f"site_{i}",
+                    use_container_width=True,
+                ):
+                    st.session_state["selected_site"] = site
+            with col_bar:
+                st.markdown(f'<div style="font-family:JetBrains Mono,monospace;font-size:0.85rem;font-weight:600;color:{bar_color};text-align:right;padding-top:8px;">{pct}%</div>', unsafe_allow_html=True)
 
         st.markdown(f"""
         <div style="margin-top:12px;padding:10px;background:rgba(0,212,170,0.08);border:1px solid rgba(0,212,170,0.2);border-radius:6px;font-size:0.75rem;color:#8a94a6;">
@@ -949,6 +946,91 @@ if GEE_READY:
 
 else:
     st.info("GEE not connected — similar sites scanning requires live satellite data.")
+
+# ====================================================================
+#  SECTION 0.5 — Selected Site Deep Dive
+# ====================================================================
+
+if "selected_site" in st.session_state and GEE_READY:
+    sel = st.session_state["selected_site"]
+    sel_pct = int(sel["similarity"] * 100)
+
+    st.markdown(f'<div class="section-header">Site Analysis — {sel["name"]} ({sel["name_ar"]})</div>', unsafe_allow_html=True)
+
+    # KPI row for selected site
+    st.markdown(f"""
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">
+        <div class="kpi-card"><div class="kpi-label">SIMILARITY</div><div class="kpi-value" style="color:{'#ff4d6a' if sel_pct>=70 else '#f0a030' if sel_pct>=40 else '#3b82f6'};">{sel_pct}%</div><div class="kpi-sub">vs {fp['reference_site']}</div></div>
+        <div class="kpi-card"><div class="kpi-label">IRON OXIDE</div><div class="kpi-value">{sel['iron_oxide']:.3f}</div><div class="kpi-sub">B4/B2 ratio</div></div>
+        <div class="kpi-card"><div class="kpi-label">CLAY INDEX</div><div class="kpi-value">{sel['clay_index']:.3f}</div><div class="kpi-sub">B6/B7 ratio</div></div>
+        <div class="kpi-card"><div class="kpi-label">NDVI</div><div class="kpi-value">{sel['ndvi']:.3f}</div><div class="kpi-sub">{'Bare rock' if sel['ndvi']<0.15 else 'Vegetated'}</div></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Fetch detailed data for selected site
+    with st.spinner(f"Loading detailed Landsat data for {sel['name']}..."):
+        sel_df = fetch_gee_data(sel["lat"], sel["lon"], 5, search_year)
+
+    if sel_df is not None and len(sel_df) > 0:
+        sel_df["Mineral_Score"] = compute_mineral_score(sel_df, fp)
+
+        sel_detail1, sel_detail2 = st.columns(2)
+
+        with sel_detail1:
+            # Heatmap for selected site
+            sel_map = folium.Map(
+                location=[sel["lat"], sel["lon"]], zoom_start=13,
+                tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                attr="Esri",
+            )
+            heat_data = sel_df[["Latitude", "Longitude", "Mineral_Score"]].values.tolist()
+            HeatMap(heat_data, radius=15, blur=20,
+                    gradient={0.2: "#0000ff", 0.4: "#00ffff", 0.6: "#00ff00", 0.8: "#ffff00", 1.0: "#ff0000"}).add_to(sel_map)
+            folium.Marker([sel["lat"], sel["lon"]], tooltip=sel["name"],
+                          icon=folium.Icon(color="green", icon="crosshairs", prefix="fa")).add_to(sel_map)
+            st.markdown(f'<div class="panel"><div class="panel-title">PROSPECTIVITY — {sel["name"].upper()}</div></div>', unsafe_allow_html=True)
+            st_folium(sel_map, width=None, height=380, use_container_width=True)
+
+        with sel_detail2:
+            # Comparison bar chart: selected site vs reference
+            ref_vals = {"Iron Oxide": 1.90, "Clay Index": 1.12, "Ferrous": 1.30}
+            site_vals = {"Iron Oxide": sel["iron_oxide"], "Clay Index": sel["clay_index"], "Ferrous": sel["ferrous"]}
+
+            fig_comp = go.Figure()
+            indices = list(ref_vals.keys())
+            fig_comp.add_trace(go.Bar(name=f"Reference ({fp['reference_site']})", x=indices, y=list(ref_vals.values()),
+                                      marker_color="#00d4aa", opacity=0.7))
+            fig_comp.add_trace(go.Bar(name=sel["name"], x=indices, y=list(site_vals.values()),
+                                      marker_color="#ff4d6a", opacity=0.7))
+            fig_comp.update_layout(
+                barmode="group", template="plotly_dark", height=200, margin=dict(t=30, b=30, l=40, r=20),
+                title=f"Spectral Comparison vs {fp['reference_site']}",
+                paper_bgcolor="#0a0e14", plot_bgcolor="#0a0e14",
+                font=dict(family="Inter", size=11, color="#8a94a6"),
+                legend=dict(orientation="h", y=-0.15),
+            )
+            st.plotly_chart(fig_comp, use_container_width=True)
+
+            # Score distribution for this site
+            high_s = len(sel_df[sel_df["Mineral_Score"] > 0.7])
+            med_s = len(sel_df[(sel_df["Mineral_Score"] > 0.4) & (sel_df["Mineral_Score"] <= 0.7)])
+            low_s = len(sel_df[sel_df["Mineral_Score"] <= 0.4])
+            fig_pie = go.Figure(data=[go.Pie(
+                labels=["High", "Moderate", "Low"], values=[high_s, med_s, low_s],
+                marker_colors=["#ff4d6a", "#f0a030", "#3b82f6"],
+                hole=0.5, textinfo="label+percent",
+            )])
+            fig_pie.update_layout(
+                template="plotly_dark", height=180, margin=dict(t=10, b=10, l=10, r=10),
+                paper_bgcolor="#0a0e14", plot_bgcolor="#0a0e14",
+                font=dict(family="Inter", size=11, color="#8a94a6"),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_pie, use_container_width=True)
+    else:
+        st.warning(f"No Landsat data available for {sel['name']} in {search_year}")
+
+    st.markdown("---")
 
 
 # ====================================================================
