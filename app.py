@@ -135,17 +135,32 @@ def fetch_gee_data(lat, lon, radius_km, year):
 
 
 def compute_mineral_score(df, fingerprint):
-    """Score each pixel against a mineral fingerprint."""
+    """Score each pixel against a mineral fingerprint using normalized Landsat ratios."""
+    # Normalize raw Landsat band ratios to 0-1 using typical ranges
+    # Iron Oxide (B4/B2): typical range 0.5-3.0
+    fe_raw = np.clip((df["Iron_Oxide"] - 0.5) / 2.5, 0, 1)
+    # Clay Index (B6/B7): typical range 0.8-1.5
+    clay_raw = np.clip((df["Clay_Index"] - 0.8) / 0.7, 0, 1)
+    # Ferrous (B6/B5): typical range 0.5-2.0
+    ferr_raw = np.clip((df["Ferrous"] - 0.5) / 1.5, 0, 1)
+
+    # Score against fingerprint thresholds using Gaussian-like proximity
     fe_min, fe_max = fingerprint["iron_oxide_range"]
     clay_min, clay_max = fingerprint["clay_index_range"]
     ferr_min, ferr_max = fingerprint["ferrous_range"]
 
-    fe_norm = np.clip((df["Iron_Oxide"] - fe_min) / (fe_max - fe_min + 1e-6), 0, 1)
-    clay_norm = np.clip((df["Clay_Index"] - clay_min) / (clay_max - clay_min + 1e-6), 0, 1)
-    ferr_norm = np.clip((df["Ferrous"] - ferr_min) / (ferr_max - ferr_min + 1e-6), 0, 1)
-    veg_mask = (df["NDVI"] < fingerprint["ndvi_max"]).astype(float)
+    fe_center = (fe_min + fe_max) / 2
+    clay_center = (clay_min + clay_max) / 2
+    ferr_center = (ferr_min + ferr_max) / 2
 
-    score = (fe_norm * 0.35 + clay_norm * 0.30 + ferr_norm * 0.20 + veg_mask * 0.15)
+    fe_score = np.exp(-((fe_raw - fe_center) ** 2) / (2 * 0.15 ** 2))
+    clay_score = np.exp(-((clay_raw - clay_center) ** 2) / (2 * 0.15 ** 2))
+    ferr_score = np.exp(-((ferr_raw - ferr_center) ** 2) / (2 * 0.15 ** 2))
+    veg_penalty = np.where(df["NDVI"] < fingerprint["ndvi_max"], 1.0, 0.3)
+
+    score = (fe_score * 0.35 + clay_score * 0.30 + ferr_score * 0.20) * veg_penalty + 0.15 * veg_penalty
+    # Stretch distribution to use full 0-1 range
+    score = (score - score.min()) / (score.max() - score.min() + 1e-6)
     return np.clip(score, 0, 1)
 
 
@@ -209,6 +224,14 @@ code, pre, .stCode, [data-testid="stCode"] {
 section[data-testid="stSidebar"] {
     background: var(--bg-secondary) !important;
     border-right: 1px solid var(--border) !important;
+}
+
+.sidebar-section-title {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    color: var(--text-muted);
+    margin: 8px 0 4px 0;
 }
 section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
 section[data-testid="stSidebar"] label {
@@ -594,20 +617,21 @@ search_year = st.sidebar.slider("Landsat Year", 2020, 2025, 2024)
 
 st.sidebar.markdown("---")
 
-with st.sidebar.expander("Map Layers", expanded=False):
-    show_geology = st.checkbox("Geological Units", value=True)
-    show_faults = st.checkbox("Fault Lines", value=True)
-    show_deposits = st.checkbox("Mineral Deposits", value=True)
-    show_heatmap = st.checkbox("Favorability Heatmap", value=True)
-    show_points = st.checkbox("Sample Points", value=False)
-    show_wms = st.checkbox("OneGeology WMS", value=False)
+st.sidebar.markdown('<div class="sidebar-section-title">MAP LAYERS</div>', unsafe_allow_html=True)
+show_geology = st.sidebar.checkbox("Geological Units", value=True)
+show_faults = st.sidebar.checkbox("Fault Lines", value=True)
+show_deposits = st.sidebar.checkbox("Mineral Deposits", value=True)
+show_heatmap = st.sidebar.checkbox("Favorability Heatmap", value=True)
+show_points = st.sidebar.checkbox("Sample Points", value=False)
+show_wms = st.sidebar.checkbox("OneGeology WMS", value=False)
 
-with st.sidebar.expander("Evidence Weights", expanded=False):
-    w_iron = st.slider("Iron Oxide (Gossan)", 0.0, 1.0, 0.35, 0.05)
-    w_clay = st.slider("Argillic Clay", 0.0, 1.0, 0.25, 0.05)
-    w_lineament = st.slider("Lineament Density", 0.0, 1.0, 0.30, 0.05)
-    w_twi = st.slider("TWI Weight", 0.0, 1.0, 0.10, 0.05)
-    gamma = st.slider("Fuzzy Gamma", 0.0, 1.0, 0.75, 0.05)
+st.sidebar.markdown("---")
+st.sidebar.markdown('<div class="sidebar-section-title">EVIDENCE WEIGHTS</div>', unsafe_allow_html=True)
+w_iron = st.sidebar.slider("Iron Oxide (Gossan)", 0.0, 1.0, 0.35, 0.05)
+w_clay = st.sidebar.slider("Argillic Clay", 0.0, 1.0, 0.25, 0.05)
+w_lineament = st.sidebar.slider("Lineament Density", 0.0, 1.0, 0.30, 0.05)
+w_twi = st.sidebar.slider("TWI Weight", 0.0, 1.0, 0.10, 0.05)
+gamma = st.sidebar.slider("Fuzzy Gamma", 0.0, 1.0, 0.75, 0.05)
 
 total_w = w_iron + w_clay + w_lineament + w_twi
 if total_w > 0:
@@ -1164,7 +1188,8 @@ st.markdown(f"""
 #  SECTION 7 — Geological Context
 # ====================================================================
 
-with st.expander("Geological Context & Methodology", expanded=False):
+st.markdown('<div class="section-label">GEOLOGICAL CONTEXT & METHODOLOGY</div>', unsafe_allow_html=True)
+with st.container():
     ctx_c1, ctx_c2 = st.columns(2)
     with ctx_c1:
         st.markdown(f"""
@@ -1199,7 +1224,8 @@ with st.expander("Geological Context & Methodology", expanded=False):
 #  SECTION 8 — Band Ratio Reference
 # ====================================================================
 
-with st.expander("Spectral Band Ratio Reference", expanded=False):
+st.markdown('<div class="section-label">SPECTRAL BAND RATIO REFERENCE</div>', unsafe_allow_html=True)
+with st.container():
     st.markdown("""
     <div class="panel">
         <div class="panel-title">Landsat 8 OLI — Band Ratio Indices</div>
